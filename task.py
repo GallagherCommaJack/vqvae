@@ -24,8 +24,7 @@ class BaseAE(pl.LightningModule):
             "aux": aux_weight,
         }
 
-    def handle_batch(self, batch):
-        reals = batch
+    def handle_reals(self, reals):
         rc, aux = self.net.forward(reals)
         mse = F.mse_loss(rc, reals)
         lpips = self.lpips.forward(rc, reals).mean()
@@ -35,7 +34,8 @@ class BaseAE(pl.LightningModule):
         return rc, losses
 
     def step(self, batch, prefix: str):
-        rc, losses = self.handle_batch(batch)
+        reals = batch
+        rc, losses = self.handle_reals(reals)
         log_dict = {f"{prefix}/{k}": v.item() for k, v in losses.items()}
         self.log_dict(log_dict)
         return {"x": reals, "xrec": rc, **losses}

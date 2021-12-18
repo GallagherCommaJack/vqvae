@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 from net import WNet
 
 # %%
-net = WNet(16, mults=[2], num_blocks=2).cuda()
+net = WNet(16, mults=[2,2,4,8], num_blocks=2).cuda()
 
 
 # %%
@@ -22,6 +22,8 @@ print(y.shape, l.shape)
 from task import BaseAE
 
 lm = BaseAE(net).cuda()
-rc, losses = lm.handle_batch(x)
+x = torch.randn([8, 3, 256, 256]).cuda()
+rc, losses = lm.handle_reals(x)
 
-print(rc.allclose(y), {k: v.shape for k, v in losses.items()})
+print({k: v.shape for k, v in losses.items()})
+print(losses)

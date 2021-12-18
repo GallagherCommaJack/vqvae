@@ -1,4 +1,5 @@
 from typing import Optional
+import numpy as np
 import torch.utils.data as D
 from PIL import Image
 from pathlib import Path
@@ -45,10 +46,28 @@ class ImageFolder(D.Dataset):
         )
 
     def __getitem__(self, ix):
-        filename = self.img_root_dir / f"{self.ixs[ix]}.jpg"
-        img = Image.open(filename)
-        img = self.transform(img)
-        return img
+        try:
+            filename = self.img_root_dir / f"{self.ixs[ix]}.jpg"
+            img = Image.open(filename)
+            img = self.transform(img)
+            return img
+        except:
+            return None
 
     def __len__(self):
         return len(self.ixs)
+
+
+def collate_skip_error(dataset):
+    def f(batch):
+        len_batch = len(batch)  # original batch length
+        batch = list(filter(lambda x: x is not None, batch))  # filter out all the Nones
+        if len_batch > len(
+            batch
+        ):  # source all the required samples from the original dataset at random
+            diff = len_batch - len(batch)
+            for i in range(diff):
+                batch.append(dataset[np.random.randint(0, len(dataset))])
+
+        return D.dataloader.default_collate(batch)
+    return f

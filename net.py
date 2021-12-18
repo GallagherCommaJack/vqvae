@@ -65,18 +65,22 @@ class Encoder(nn.Module):
             ff_mult=ff_mult,
         )
 
-        self.quant_conv = nn.Conv2d(dim * mults[-1], codebook_dim, 1)
+        self.quant_conv = nn.Conv2d(dims[down_stages], codebook_dim, 1)
 
         self.codebooks = ResidualVQ(
+            # dim=dims[down_stages],
+            # dim=dim,
             dim=codebook_dim,
+            # codebook_dim=codebook_dim,
             num_quantizers=bits,
             codebook_size=2,
             kmeans_init=True,
-            decay=0.9,
+            decay=0.99,
             commitment_weight=1e-2,
-            orthogonal_reg_weight=1e-2,
-            use_cosine_sim=True,
+            orthogonal_reg_weight=10.0,
+            # use_cosine_sim=True,
             accept_image_fmap=True,
+            sync_codebook=use_ddp,
         )
 
     def forward(self, x):
@@ -117,7 +121,7 @@ class Decoder(nn.Module):
         dims = dim * np.array(mults)
 
         self.pe = FourierPosEmb(pe_dim)
-        self.quant_conv = nn.Conv2d(codebook_dim + pe_dim, dim * mults[down_stages], 1)
+        self.quant_conv = nn.Conv2d(codebook_dim + pe_dim, dims[down_stages], 1)
 
         self.u_net = unet(
             dim=dims[down_stages],

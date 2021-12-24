@@ -10,7 +10,6 @@ from diffusion_utils.pos_emb import FourierPosEmb
 from vector_quantize_pytorch import ResidualVQ
 from einops import rearrange
 
-
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -25,6 +24,8 @@ class Encoder(nn.Module):
         bits: int = 14,
         codebook_dim: int = 16,
         use_ddp: bool = False,
+        use_fft: bool = False,
+        use_depthwise: bool = False,
     ):
         super().__init__()
         down_stages = int(math.log2(f))
@@ -47,25 +48,37 @@ class Encoder(nn.Module):
         for d_in, d_out in zip(dims[:down_stages], dims[1 : down_stages + 1]):
             down_blocks.append(
                 nn.Sequential(
-                    Block(d_in, num_blocks, rotary_emb=False, ff_mult=ff_mult),
+                    Block(
+                        d_in,
+                        num_blocks,
+                        rotary_emb=False,
+                        ff_mult=ff_mult,
+                        conv_fft=use_fft,
+                        use_depthwise=use_depthwise,
+                    ),
                     nn.Conv2d(d_in, d_out // 4, 3, padding=1),
                     nn.PixelUnshuffle(2),
                 )
             )
         self.down = nn.Sequential(*down_blocks)
 
-        self.u_net = unet(
-            dim=dims[down_stages],
-            channels=dims[down_stages],
-            num_blocks=num_blocks,
-            mults=mults[down_stages + 1 :],
-            stages=u_net_stages,
-            input_res=4096,  # hack to make it use channel attention at all resolutions
-            rotary_emb=False,
-            ff_mult=ff_mult,
-        )
+        # self.u_net = unet(
+        #     dim=dims[down_stages],
+        #     channels=dims[down_stages],
+        #     num_blocks=num_blocks,
+        #     mults=mults[down_stages + 1 :],
+        #     stages=u_net_stages,
+        #     input_res=4096,  # hack to make it use channel attention at all resolutions
+        #     rotary_emb=False,
+        #     ff_mult=ff_mult,
+        #     conv_fft=use_fft,
+        #     use_depthwise=use_depthwise,
+        # )
 
-        self.quant_conv = nn.Conv2d(dims[down_stages], codebook_dim, 1)
+        self.quant_conv = nn.Sequential(
+            nn.Conv2d(dims[down_stages], codebook_dim, 1, bias=False),
+            nn.BatchNorm2d(codebook_dim, affine=False),
+        )
 
         self.codebooks = ResidualVQ(
             # dim=dims[down_stages],
@@ -77,7 +90,7 @@ class Encoder(nn.Module):
             kmeans_init=True,
             decay=0.99,
             commitment_weight=1e-2,
-            orthogonal_reg_weight=10.0,
+            # orthogonal_reg_weight=10.0,
             # use_cosine_sim=True,
             accept_image_fmap=True,
             sync_codebook=use_ddp,
@@ -87,12 +100,12 @@ class Encoder(nn.Module):
         y = torch.cat([x, self.pe(x)], dim=1)
         y = self.project_in(y)
         y = self.down(y)
-        y = self.u_net([y, None])
+        # y = self.u_net([y, None])
         y = self.quant_conv(y)
         qs, ixs, ls = self.codebooks(y)
         ixs = rearrange(ixs, "c b h w -> b c h w")
         loss = torch.mean(ls)
-        return qs, ixs, loss
+        return y, qs, ixs, loss
 
 
 class Decoder(nn.Module):
@@ -107,6 +120,8 @@ class Decoder(nn.Module):
         out_ch: int = 3,
         pe_dim: int = 8,
         codebook_dim: int = 16,
+        use_fft: bool = True,
+        use_depthwise: bool = False,
     ):
         super().__init__()
         down_stages = int(math.log2(f))
@@ -123,23 +138,32 @@ class Decoder(nn.Module):
         self.pe = FourierPosEmb(pe_dim)
         self.quant_conv = nn.Conv2d(codebook_dim + pe_dim, dims[down_stages], 1)
 
-        self.u_net = unet(
-            dim=dims[down_stages],
-            channels=dims[down_stages],
-            num_blocks=num_blocks,
-            mults=mults[down_stages + 1 :],
-            stages=u_net_stages,
-            input_res=4096,  # hack to make it use channel attention at all resolutions
-            rotary_emb=False,
-            ff_mult=ff_mult,
-            heads=8,
-        )
+        # self.u_net = unet(
+        #     dim=dims[down_stages],
+        #     channels=dims[down_stages],
+        #     num_blocks=num_blocks,
+        #     mults=mults[down_stages + 1 :],
+        #     stages=u_net_stages,
+        #     input_res=4096,  # hack to make it use channel attention at all resolutions
+        #     rotary_emb=False,
+        #     ff_mult=ff_mult,
+        #     conv_fft=use_fft,
+        #     heads=8,
+        #     use_depthwise=use_depthwise,
+        # )
 
         up_blocks = []
         for d_out, d_in in zip(dims[:down_stages], dims[1 : down_stages + 1]):
             up_blocks.append(
                 nn.Sequential(
-                    Block(d_in, num_blocks, rotary_emb=False, ff_mult=ff_mult),
+                    Block(
+                        d_in,
+                        num_blocks,
+                        rotary_emb=False,
+                        ff_mult=ff_mult,
+                        conv_fft=use_fft,
+                        use_depthwise=use_depthwise,
+                    ),
                     nn.Conv2d(d_in, d_out * 4, 3, padding=1),
                     nn.PixelShuffle(2),
                 )
@@ -150,7 +174,7 @@ class Decoder(nn.Module):
     def forward(self, qs):
         y = torch.cat([qs, self.pe(qs)], dim=1)
         y = self.quant_conv(y)
-        y = self.u_net([y, None])
+        # y = self.u_net([y, None])
         y = self.up(y)
         y = self.conv_out(y)
         return y
@@ -170,6 +194,9 @@ class WNet(nn.Module):
         bits: int = 14,
         codebook_dim: int = 16,
         use_ddp: bool = False,
+        use_fft: bool = False,
+        use_depthwise: bool = False,
+        use_quant: bool = True,
     ):
         super().__init__()
         self.encoder = Encoder(
@@ -184,6 +211,8 @@ class WNet(nn.Module):
             codebook_dim=codebook_dim,
             bits=bits,
             use_ddp=use_ddp,
+            use_fft=use_fft,
+            use_depthwise=use_depthwise,
         )
         self.decoder = Decoder(
             dim,
@@ -195,10 +224,16 @@ class WNet(nn.Module):
             out_ch=in_ch,
             pe_dim=pe_dim,
             codebook_dim=codebook_dim,
+            use_fft=use_fft,
+            use_depthwise=use_depthwise,
         )
+        self.use_quant = use_quant
 
-    def forward(self, x):
-        qs, ixs, ls = self.encoder(x)
-        rc = self.decoder(qs)
+    def forward(self, x, do_log=True):
+        y, qs, ixs, ls = self.encoder(x)
+        if self.use_quant:
+            rc = self.decoder(qs)
+        else:
+            rc = self.decoder(y)
         return rc, ls
 

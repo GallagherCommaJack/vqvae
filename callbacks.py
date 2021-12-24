@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple
+from PIL.Image import Image
 
 import torch
 import pytorch_lightning as pl
@@ -9,6 +10,8 @@ from pytorch_lightning.utilities.distributed import rank_zero_only
 import torch.nn.functional as F
 from torchvision.utils import make_grid
 import wandb
+
+from PIL import ImageChops
 
 
 class ReconstructedImageLogger(Callback):
@@ -51,42 +54,73 @@ class ReconstructedImageLogger(Callback):
         self.use_wandb = use_wandb
 
     def mk_grid(self, x):
-        # x = x.add(1).div(2).clamp(0, 1)
+        x = x.add(1).div(2).clamp(0, 1)
         x_grid = make_grid(
             tensor=x,
             nrow=self.nrow,
             padding=self.padding,
-            normalize=self.normalize,
-            value_range=self.norm_range,
-            scale_each=self.scale_each,
             pad_value=self.pad_value,
+            # normalize=self.normalize,
+            # value_range=self.norm_range,
+            # scale_each=self.scale_each,
         )
         return x_grid
 
-    def log_grids(self, prefix, x_grid, xrec_grid, trainer):
+    def log_grids(self, prefix, trainer, x_grid, xrec_grid, quant_grid):
+        diff_grid = ImageChops.difference(x_grid, xrec_grid)
+        qdiff_grid = ImageChops.difference(x_grid, quant_grid)
+        qerr_grid = ImageChops.difference(xrec_grid, quant_grid)
         if self.use_wandb:
             trainer.logger.experiment.log(
                 {
                     f"{prefix}/input": wandb.Image(x_grid),
-                    f"{prefix}/reconstruction": wandb.Image(xrec_grid),
+                    f"{prefix}/reconstruction/continuous": wandb.Image(xrec_grid),
+                    f"{prefix}/reconstruction/quantized": wandb.Image(quant_grid),
+                    f"{prefix}/diff/continuous": wandb.Image(diff_grid),
+                    f"{prefix}/diff/quantized": wandb.Image(qdiff_grid),
+                    f"{prefix}/diff/quantization": wandb.Image(qerr_grid),
                     "global_step": trainer.global_step,
                 }
             )
         else:
-            x_title = f"{prefix}/input"
             trainer.logger.experiment.add_image(
-                x_title, x_grid, global_step=trainer.global_step
+                f"{prefix}/input", x_grid, global_step=trainer.global_step
             )
-            xrec_title = f"{prefix}/reconstruction"
             trainer.logger.experiment.add_image(
-                xrec_title, xrec_grid, global_step=trainer.global_step
+                f"{prefix}/reconstruction/continuous",
+                xrec_grid,
+                global_step=trainer.global_step,
+            )
+            trainer.logger.experiment.add_image(
+                f"{prefix}/reconstruction/quantized",
+                quant_grid,
+                global_step=trainer.global_step,
+            )
+            trainer.logger.experiment.add_image(
+                f"{prefix}/diff/continuous", diff_grid, global_step=trainer.global_step,
+            )
+            trainer.logger.experiment.add_image(
+                f"{prefix}/diff/quantized", qdiff_grid, global_step=trainer.global_step,
+            )
+            trainer.logger.experiment.add_image(
+                f"{prefix}/diff/quantization",
+                qerr_grid,
+                global_step=trainer.global_step,
             )
 
-    def handle_batch(self, prefix, outputs, trainer):
+    def handle_batch(self, module, prefix, batch, trainer):
         if trainer.global_step % self.every_n_steps == 0:
-            output = outputs[0] if self.multi_optim else outputs
-            grids = [self.mk_grid(output[k]) for k in ["x", "xrec"]]
-            self.log_grids(prefix, *grids, trainer)
+            was_training = module.training
+            module.eval()
+            reals = batch
+            with torch.no_grad():
+                y, q, _, _ = module.encode(reals)
+                rc = module.decode(y)
+                rc_q = module.decode(q)
+            grids = map(self.mk_grid, [reals, rc, rc_q])
+            self.log_grids(prefix, trainer, *grids)
+            if was_training:
+                module.train()
 
     @rank_zero_only
     def on_train_batch_end(
@@ -98,7 +132,7 @@ class ReconstructedImageLogger(Callback):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        self.handle_batch("train", outputs, trainer)
+        self.handle_batch(pl_module, "train", batch, trainer)
 
     @rank_zero_only
     def on_validation_batch_end(
@@ -110,4 +144,4 @@ class ReconstructedImageLogger(Callback):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        self.handle_batch("valid", outputs, trainer)
+        self.handle_batch(pl_module, "valid", batch, trainer)

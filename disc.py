@@ -35,6 +35,12 @@ def ff(dim: int, mult: int = 2):
     ]
 
 
+class PrintShape(nn.Module):
+    def forward(self, x):
+        print(x.shape)
+        return x
+
+
 def discriminator(input_ch=3, dim=64, depth=3, grad_scale=None):
     if grad_scale:
         blocks = [ScaleGrad(grad_scale)]
@@ -49,6 +55,6 @@ def discriminator(input_ch=3, dim=64, depth=3, grad_scale=None):
         blocks += [downsampler(d_in, d_out), nn.BatchNorm2d(d_out), act()]
 
     blocks += ff(dims[-1])
-    blocks.append(nn.Conv2d(dims[-1], 1))
+    blocks.append(nn.Conv2d(dims[-1], 1, 1))
 
     return nn.Sequential(*blocks)

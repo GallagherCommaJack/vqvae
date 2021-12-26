@@ -10,6 +10,7 @@ from diffusion_utils.pos_emb import FourierPosEmb
 from vector_quantize_pytorch import ResidualVQ
 from einops import rearrange
 
+
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -227,6 +228,7 @@ class WNet(nn.Module):
             use_fft=use_fft,
             use_depthwise=use_depthwise,
         )
+
         self.use_quant = use_quant
 
     def forward(self, x, do_log=True):

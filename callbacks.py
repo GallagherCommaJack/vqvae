@@ -67,9 +67,9 @@ class ReconstructedImageLogger(Callback):
         return x_grid
 
     def log_grids(self, prefix, trainer, x_grid, xrec_grid, quant_grid):
-        diff_grid = ImageChops.difference(x_grid, xrec_grid)
-        qdiff_grid = ImageChops.difference(x_grid, quant_grid)
-        qerr_grid = ImageChops.difference(xrec_grid, quant_grid)
+        diff_grid = x_grid.sub(xrec_grid).abs()
+        qdiff_grid = x_grid.sub(quant_grid).abs()
+        qerr_grid = xrec_grid.sub(quant_grid).abs()
         if self.use_wandb:
             trainer.logger.experiment.log(
                 {

@@ -24,6 +24,7 @@ class BaseAE(pl.LightningModule):
         super().__init__()
         self.net = net
         self.lpips = lpips.LPIPS(net=lpips_net)
+        self.lpips.eval().requires_grad_(False)
         self.weights = {
             "mse": mse_weight,
             "lpips": lpips_weight,
@@ -59,7 +60,7 @@ class BaseAEGAN(pl.LightningModule):
         net: nn.Module,
         lpips_net: str = "vgg",
         disc_dim: int = 64,
-        disc_depth: int = 64,
+        disc_depth: int = 3,
         mse_weight: float = 1.0,
         lpips_weight: float = 1.0,
         aux_weight: float = 1.0,
@@ -69,6 +70,7 @@ class BaseAEGAN(pl.LightningModule):
         self.net = net
         self.disc = discriminator(dim=disc_dim, depth=disc_depth, grad_scale=-1.0,)
         self.lpips = lpips.LPIPS(net=lpips_net)
+        self.lpips.eval().requires_grad_(False)
         self.weights = {
             "mse": mse_weight,
             "lpips": lpips_weight,

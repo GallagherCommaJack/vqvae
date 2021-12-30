@@ -114,7 +114,7 @@ class ReconstructedImageLogger(Callback):
             module.eval()
             reals = batch
             with torch.no_grad():
-                y, q, _, _ = module.encode(reals)
+                y, q, *_ = module.encode(reals)
                 rc = module.decode(y)
                 rc_q = module.decode(q)
             grids = map(self.mk_grid, [reals, rc, rc_q])

@@ -8,8 +8,7 @@ import lpips
 from disc import discriminator
 
 d_loss = lambda logits_real, logits_fake: F.softplus(
-    torch.stack([-logits_real, logits_fake])
-).mean()
+    torch.stack([-logits_real, logits_fake])).mean()
 
 
 class BaseAE(pl.LightningModule):
@@ -22,6 +21,7 @@ class BaseAE(pl.LightningModule):
         aux_weight: float = 1.0,
         p_quant: float = 0.5,
         seed: int = 42,
+        lr: float = 1e-4,
     ):
         super().__init__()
         self.net = net
@@ -33,12 +33,14 @@ class BaseAE(pl.LightningModule):
             "aux": aux_weight,
         }
         self.p_quant = p_quant
-        self.rng = torch.quasirandom.SobolEngine(dimension=1, scramble=True, seed=seed)
+        self.rng = torch.quasirandom.SobolEngine(dimension=1,
+                                                 scramble=True,
+                                                 seed=seed)
+        self.lr = lr
 
     def handle_reals(self, reals):
-        quant_mask = (
-            self.rng.draw(reals.size(0))[:, 0].to(device=self.device) < self.p_quant
-        )
+        quant_mask = (self.rng.draw(reals.size(0))[:, 0].to(device=self.device)
+                      < self.p_quant)
         rc, aux = self.net.forward(reals, quant_mask=quant_mask)
         mse = F.mse_loss(rc, reals)
         lpips = self.lpips.forward(rc, reals).mean()
@@ -60,6 +62,10 @@ class BaseAE(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         return self.step(batch, "valid")
 
+    def configure_optimizers(self):
+        opt = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        return opt
+
 
 class BaseAEGAN(BaseAE):
     def __init__(
@@ -74,6 +80,7 @@ class BaseAEGAN(BaseAE):
         disc_weight: float = 1.0,
         p_quant: float = 0.5,
         seed: int = 42,
+        lr: float = 1e-4,
     ):
         super().__init__(
             net=net,
@@ -83,8 +90,13 @@ class BaseAEGAN(BaseAE):
             aux_weight=aux_weight,
             p_quant=p_quant,
             seed=seed,
+            lr=lr,
         )
-        self.disc = discriminator(dim=disc_dim, depth=disc_depth, grad_scale=-1.0,)
+        self.disc = discriminator(
+            dim=disc_dim,
+            depth=disc_depth,
+            grad_scale=-1.0,
+        )
         self.weights["disc"] = disc_weight
 
     def handle_reals(self, reals):

@@ -137,6 +137,7 @@ class WNetAEGAN(BaseAEGAN):
         steps_per_epoch: int = None,
         batch_size: int = 16,
         use_attn: bool = True,
+        lr: float = 1e-4,
     ):
         self.batch_size = batch_size
         net = VQVAE(
@@ -165,6 +166,7 @@ class WNetAEGAN(BaseAEGAN):
         )
         self.epochs = epochs
         self.steps_per_epoch = steps_per_epoch
+        self.lr = lr
 
     # variable bitrate dropout
     # ignoring for now
@@ -239,7 +241,7 @@ class WNetAEGAN(BaseAEGAN):
         return self.net.forward(x)
 
     def configure_optimizers(self):
-        opt = optim.AdamW(self.parameters(), lr=1e-4)
+        opt = optim.AdamW(self.parameters(), lr=self.lr)
         if self.epochs and self.steps_per_epoch:
             sched = optim.lr_scheduler.OneCycleLR(
                 opt, 5e-4, epochs=self.epochs, steps_per_epoch=self.steps_per_epoch,
@@ -258,12 +260,21 @@ def main():
     from pytorch_lightning import Trainer
     from pytorch_lightning.plugins import DDPPlugin
 
-    batch_size = 32
+    batch_size = 64
     epochs = 4
-    gpus = 8
-    fast_dev_run = False
-    # resume_path = "/data2/vqvae-ckpt/run_f8_quant_gan/last.ckpt"
-    ckpt_path = "/data2/vqvae-ckpt/gan_f8_vendor"
+    mode = "train"
+    if mode == "test1":
+        gpus = 1
+        fast_dev_run = 10
+    elif mode == "test2":
+        gpus = 2
+        fast_dev_run = 10
+    elif mode == "train":
+        gpus = -1
+        fast_dev_run = False
+    ckpt_path = "/data2/vqvae-ckpt/gan_f16_vendor_d32_b64_noattn_1"
+    resume_path = "/data2/vqvae-ckpt/gan_f16_vendor_d32_b64_noattn/last.ckpt"
+    # resume_path = None
 
     dset = ImageFolder(
         "/data1/DALLE-datasets/general/cc12", "ixs_filtered.txt", 256, "images"
@@ -271,20 +282,19 @@ def main():
     loader = DataLoader(
         dset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=128,
         pin_memory=True,
         drop_last=True,
     )
 
-    model = WNetAEGAN(
-        # resume_path,
-        # strict=False,
+    hparams = dict(
+        lr=1e-4,
         dim=32,
-        use_attn=True,
-        f=8,
-        bits=16,
-        codebook_dim=16,
+        use_attn=False,
+        f=16,
+        bits=64,
+        codebook_dim=32,
         num_blocks=4,
         mse_weight=1.0,
         lpips_weight=0.1,
@@ -294,12 +304,17 @@ def main():
         ff_mult=4,
         use_ddp=gpus > 1,
     )
+    if resume_path:
+        model = WNetAEGAN.load_from_checkpoint(resume_path, strict=False, **hparams,)
+    else:
+        model = WNetAEGAN(**hparams)
+
     if gpus > 1:
         model = SyncBatchNorm.convert_sync_batchnorm(model)
 
     checkpoint_callback = ModelCheckpoint(
         ckpt_path,
-        train_time_interval=timedelta(hours=1),
+        train_time_interval=timedelta(minutes=10),
         save_top_k=10,
         save_last=True,
         monitor="train/mse",
@@ -316,9 +331,9 @@ def main():
         # terminate_on_nan=True,
         # benchmark=True,
         log_every_n_steps=5,
-        # max_epochs=epochs,
+        max_epochs=epochs,
         # auto_scale_batch_size="binsearch",
-        # resume_from_checkpoint=resume_path,
+        resume_from_checkpoint=resume_path,
     )
 
     # print("init done, finding batch size")
@@ -330,7 +345,8 @@ def main():
     # model.reset_codebook()
     trainer.fit(model, loader)
 
-    # trainer.save_checkpoint("gan_f8_moe.ckpt")
+    if mode == "train":
+        trainer.save_checkpoint("gan_f16_d32_b64.ckpt")
 
 
 if __name__ == "__main__":

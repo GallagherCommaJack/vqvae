@@ -8,7 +8,8 @@ import lpips
 from disc import discriminator
 
 d_loss = lambda logits_real, logits_fake: F.softplus(
-    torch.stack([-logits_real, logits_fake])).mean()
+    torch.stack([-logits_real, logits_fake])
+).mean()
 
 
 class BaseAE(pl.LightningModule):
@@ -33,14 +34,13 @@ class BaseAE(pl.LightningModule):
             "aux": aux_weight,
         }
         self.p_quant = p_quant
-        self.rng = torch.quasirandom.SobolEngine(dimension=1,
-                                                 scramble=True,
-                                                 seed=seed)
+        self.rng = torch.quasirandom.SobolEngine(dimension=1, scramble=True, seed=seed)
         self.lr = lr
 
     def handle_reals(self, reals):
-        quant_mask = (self.rng.draw(reals.size(0))[:, 0].to(device=self.device)
-                      < self.p_quant)
+        quant_mask = (
+            self.rng.draw(reals.size(0))[:, 0].to(device=self.device) < self.p_quant
+        )
         rc, aux = self.net.forward(reals, quant_mask=quant_mask)
         mse = F.mse_loss(rc, reals)
         lpips = self.lpips.forward(rc, reals).mean()

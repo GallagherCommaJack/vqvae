@@ -87,6 +87,7 @@ class BaseAE(pl.LightningModule):
         aux_weight: float = 1.0,
         p_quant: float = 0.5,
         seed: int = 42,
+        lr: float = 1e-4,
     ):
         super().__init__()
         self.net = net
@@ -104,6 +105,7 @@ class BaseAE(pl.LightningModule):
         )
         self.metrics.eval().requires_grad_(False)
         self.rng = torch.quasirandom.SobolEngine(dimension=1, scramble=True, seed=seed)
+        self.lr = lr
 
     def handle_reals(self, reals):
         quant_mask = (
@@ -137,6 +139,10 @@ class BaseAE(pl.LightningModule):
             self.metrics.compute(), prog_bar=True,
         )
 
+    def configure_optimizers(self):
+        opt = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        return opt
+
 
 class BaseAEGAN(BaseAE):
     def __init__(
@@ -151,6 +157,7 @@ class BaseAEGAN(BaseAE):
         disc_weight: float = 1.0,
         p_quant: float = 0.5,
         seed: int = 42,
+        lr: float = 1e-4,
     ):
         super().__init__(
             net=net,
@@ -160,8 +167,13 @@ class BaseAEGAN(BaseAE):
             aux_weight=aux_weight,
             p_quant=p_quant,
             seed=seed,
+            lr=lr,
         )
-        self.disc = discriminator(dim=disc_dim, depth=disc_depth, grad_scale=-1.0,)
+        self.disc = discriminator(
+            dim=disc_dim,
+            depth=disc_depth,
+            grad_scale=-1.0,
+        )
         self.weights["disc"] = disc_weight
 
     def handle_reals(self, reals):

@@ -1,10 +1,12 @@
 from typing import Optional
 import numpy as np
 import torch.utils.data as D
+import torch
 from PIL import Image
 from pathlib import Path
 
 import torchvision.transforms as TV
+import pytorch_lightning as pl
 
 
 class Grayscale2RGB:
@@ -70,4 +72,58 @@ def collate_skip_error(dataset):
                 batch.append(dataset[np.random.randint(0, len(dataset))])
 
         return D.dataloader.default_collate(batch)
+
     return f
+
+
+class ImageFolderDataModule(pl.LightningDataModule):
+    def __init__(
+        self,
+        root_dir: str,
+        ix_file: str,
+        res: int = 192,
+        img_folder: Optional[str] = None,
+        val_size=1,
+        seed: int = 42,
+        batch_size: int = 1,
+        num_workers: int = 128,
+    ):
+        super().__init__()
+        ds_base = ImageFolder(
+            root_dir=root_dir, ix_file=ix_file, res=res, img_folder=img_folder
+        )
+
+        if isinstance(val_size, int):
+            vsize = val_size * batch_size
+        elif isinstance(val_size, float):
+            vsize = (len(ds_base) * val_size // batch_size) * batch_size
+
+        tsize = len(ds_base) - vsize
+
+        dt, dv = D.random_split(
+            ds_base, [tsize, vsize], generator=torch.Generator().manual_seed(seed)
+        )
+        self.dt = dt
+        self.dv = dv
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+    def train_dataloader(self):
+        return D.DataLoader(
+            self.dt,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+
+    def val_dataloader(self):
+        return D.DataLoader(
+            self.dv,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+

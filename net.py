@@ -1,13 +1,16 @@
-from functools import partial
 import math
-import numpy as np
-from typing import Optional, Sequence
+from functools import partial
+from typing import Optional, Sequence, Tuple
 
+import numpy as np
+import torch
+import torch.nn.functional as F
+from diffusion_utils.norm import LayerNorm
 from einops import rearrange
 from einops.layers.torch import Rearrange
-import torch
 from torch import nn
-import torch.nn.functional as F
+from torch.nn.modules import padding
+from tqdm import tqdm
 from vector_quantize_pytorch import ResidualVQ
 
 
@@ -74,16 +77,16 @@ def factor_int(n):
 
 
 class FF(nn.Module):
-    def __init__(self, dim: int, ff_mult: int):
+    def __init__(self, dim: int, ff_mult: int, use_batchnorm: bool = True):
         super().__init__()
         inner = [
-            nn.BatchNorm2d(dim),
+            nn.BatchNorm2d(dim) if use_batchnorm else LayerNorm(dim),
             nn.ReLU(inplace=True),
             nn.Conv2d(dim, dim * ff_mult, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(dim * ff_mult, dim, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.BatchNorm2d(dim),
+            nn.BatchNorm2d(dim) if use_batchnorm else LayerNorm(dim),
         ]
         with torch.no_grad():
             inner[-1].weight.fill_(1e-1)
@@ -150,14 +153,16 @@ class ScaledCosineAttention(nn.Module):
 
 class ChannelAttention(nn.Module):
     def __init__(
-        self, dim, heads=8,
+        self, dim, heads=8, use_batchnorm=True,
     ):
         super().__init__()
         self.heads = heads
         inner_dim = dim
         assert inner_dim % heads == 0
         dim_head = inner_dim // heads
-        self.norm_in = nn.BatchNorm2d(dim, affine=False)
+        self.norm_in = (
+            nn.BatchNorm2d(dim, affine=False) if use_batchnorm else LayerNorm(dim)
+        )
         self.attn = ScaledCosineAttention(heads, dim_head)
         self.proj_in = nn.Sequential(
             nn.Conv2d(dim, inner_dim * 3, 3, padding=1),
@@ -165,7 +170,7 @@ class ChannelAttention(nn.Module):
         )
         self.proj_out = nn.Sequential(
             nn.Conv2d(inner_dim, dim * 2, 3, padding=1, bias=False),
-            nn.BatchNorm2d(dim * 2),
+            nn.BatchNorm2d(dim * 2) if use_batchnorm else nn.GroupNorm(2, dim * 2),
         )
         with torch.no_grad():
             self.proj_out[-1].weight.fill_(1e-3)
@@ -182,27 +187,43 @@ class ChannelAttention(nn.Module):
 
 class Block(nn.Module):
     def __init__(
-        self, dim: int, num_blocks: int = 2, ff_mult: int = 4, use_attn: bool = True,
+        self,
+        dim: int,
+        num_blocks: int = 2,
+        ff_mult: int = 4,
+        use_attn: bool = True,
+        use_batchnorm: bool = True,
     ):
         super().__init__()
 
-        ffs = [FF(dim, ff_mult) for _ in range(num_blocks)]
+        ffs = [FF(dim, ff_mult, use_batchnorm=use_batchnorm) for _ in range(num_blocks)]
         if use_attn:
             h, d = factor_int(dim)
-            attns = [ChannelAttention(dim, heads=h) for _ in range(num_blocks)]
+            attns = [
+                ChannelAttention(dim, heads=h, use_batchnorm=use_batchnorm)
+                for _ in range(num_blocks)
+            ]
             blocks = [nn.Sequential(ff, a) for ff, a in zip(ffs, attns)]
         else:
             blocks = ffs
         self.inner = nn.Sequential(*blocks)
 
-        self.pre_norm = nn.BatchNorm2d(dim)
-        self.post_norm = nn.BatchNorm2d(dim)
+        self.pre_norm = nn.BatchNorm2d(dim) if use_batchnorm else LayerNorm(dim)
+        self.post_norm = nn.BatchNorm2d(dim) if use_batchnorm else LayerNorm(dim)
 
     def forward(self, x):
         x = self.pre_norm(x)
         x = self.inner(x)
         x = self.post_norm(x)
         return x
+
+
+class Downsampler(nn.Sequential):
+    def __init__(self, ch_in: int, ch_out: int, factor: int = 2):
+        super().__init__(
+            nn.Conv2d(ch_in, ch_out // factor ** 2, 3, padding=1),
+            nn.PixelUnshuffle(factor),
+        )
 
 
 class Encoder(nn.Module):
@@ -215,10 +236,12 @@ class Encoder(nn.Module):
         ff_mult: int = 2,
         in_ch: int = 3,
         pe_dim: int = 8,
-        bits: int = 14,
+        num_codes: int = 2,
+        num_codebooks: int = 14,
         codebook_dim: int = 16,
         use_ddp: bool = False,
         use_attn: bool = True,
+        use_batchnorm: bool = True,
     ):
         super().__init__()
         stages = int(math.log2(f))
@@ -240,29 +263,32 @@ class Encoder(nn.Module):
         for d_in, d_out in zip(dims[:stages], dims[1 : stages + 1]):
             downs.append(
                 nn.Sequential(
-                    Block(d_in, num_blocks, ff_mult=ff_mult, use_attn=use_attn,),
-                    nn.Conv2d(d_in, d_out // 4, 3, padding=1),
-                    nn.PixelUnshuffle(2),
+                    Downsampler(d_in, d_out, 2),
+                    Block(
+                        d_out,
+                        num_blocks,
+                        ff_mult=ff_mult,
+                        use_attn=use_attn,
+                        use_batchnorm=use_batchnorm,
+                    ),
                 )
             )
         self.down = nn.Sequential(*downs)
 
         self.quant_conv = nn.Sequential(
             nn.Conv2d(dims[stages], codebook_dim, 1, bias=False),
-            nn.BatchNorm2d(codebook_dim, affine=False),
+            nn.BatchNorm2d(codebook_dim, affine=False)
+            if use_batchnorm
+            else nn.GroupNorm(1, codebook_dim, affine=False),
         )
 
         self.codebooks = ResidualVQ(
-            # dim=dims[down_stages],
             dim=codebook_dim,
-            # codebook_dim=codebook_dim,
-            num_quantizers=bits,
-            codebook_size=2,
+            num_quantizers=num_codebooks,
+            codebook_size=num_codes,
             kmeans_init=True,
             decay=0.99,
-            commitment_weight=1e-2,
-            # orthogonal_reg_weight=10.0,
-            # use_cosine_sim=True,
+            commitment_weight=1.0,
             accept_image_fmap=True,
             sync_codebook=use_ddp,
         )
@@ -271,11 +297,26 @@ class Encoder(nn.Module):
         y = torch.cat([x, self.pe(x)], dim=1)
         y = self.project_in(y)
         y = self.down(y)
-        y = self.quant_conv(y)
-        qs, ixs, ls = self.codebooks(y)
+        with torch.cuda.amp.autocast(False):
+            y = y.to(dtype=torch.float32)
+            y = self.quant_conv(y)
+            qs, ixs, ls = self.codebooks(y)
         ixs = rearrange(ixs, "c b h w -> b c h w")
         l_quant = torch.mean(ls)
         return y, qs, ixs, l_quant
+
+
+class Upsampler(nn.Sequential):
+    def __init__(self, ch_in: int, ch_out: int, factor: int = 2):
+        super().__init__(
+            nn.Conv2d(ch_in, ch_out * factor ** 2, 3, padding=1),
+            nn.PixelShuffle(factor),
+        )
+
+
+class SkipUpsampler(Upsampler):
+    def __init__(self, ch_in: int, ch_out: int, factor: int = 2):
+        super().__init__(ch_in * 2, ch_out, factor)
 
 
 class Decoder(nn.Module):
@@ -290,9 +331,11 @@ class Decoder(nn.Module):
         pe_dim: int = 8,
         codebook_dim: int = 16,
         use_attn: bool = True,
+        use_batchnorm: bool = True,
     ):
         super().__init__()
         stages = int(math.log2(f))
+
         if mults is None:
             mults = [2 ** (i + 1) for i in range(stages)]
         elif len(mults) < stages:
@@ -309,9 +352,14 @@ class Decoder(nn.Module):
         for d_out, d_in in zip(dims[:stages], dims[1 : stages + 1]):
             up_blocks.append(
                 nn.Sequential(
-                    Block(d_in, num_blocks, ff_mult=ff_mult, use_attn=use_attn),
-                    nn.Conv2d(d_in, d_out * 4, 3, padding=1),
-                    nn.PixelShuffle(2),
+                    Block(
+                        d_in,
+                        num_blocks,
+                        ff_mult=ff_mult,
+                        use_attn=use_attn,
+                        use_batchnorm=use_batchnorm,
+                    ),
+                    Upsampler(d_in, d_out, 2),
                 )
             )
         self.up = nn.Sequential(*reversed(up_blocks))
@@ -335,7 +383,8 @@ class VQVAE(nn.Module):
         ff_mult: int = 2,
         in_ch: int = 3,
         pe_dim: int = 8,
-        bits: int = 14,
+        num_codes: int = 2,
+        num_codebooks: int = 14,
         codebook_dim: int = 16,
         use_ddp: bool = False,
         use_quant: bool = True,
@@ -351,7 +400,8 @@ class VQVAE(nn.Module):
             in_ch=in_ch,
             pe_dim=pe_dim,
             codebook_dim=codebook_dim,
-            bits=bits,
+            num_codes=num_codes,
+            num_codebooks=num_codebooks,
             use_ddp=use_ddp,
             use_attn=use_attn,
         )
@@ -379,4 +429,230 @@ class VQVAE(nn.Module):
             z = y
         rc = self.decoder(z)
         return rc, l_quant
+
+
+class DiffusionDecoder(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        f: int = 8,
+        num_blocks: int = 2,
+        up_mults: Sequence[int] = None,
+        ff_mult: int = 2,
+        out_ch: int = 3,
+        pe_dim: int = 8,
+        codebook_dim: int = 16,
+        decoder_use_attn: bool = False,
+        u_net_use_attn: bool = True,
+        u_net_stages: int = 4,
+        u_net_ff_mult: int = None,
+        u_net_mults: Sequence[int] = None,
+        num_diffusion_blocks: int = None,
+        time_emb_dim: int = 4,
+    ):
+        super().__init__()
+        self.f = f
+        self.out_ch = out_ch
+        num_diffusion_blocks = (
+            num_diffusion_blocks if num_diffusion_blocks else num_blocks
+        )
+        u_net_ff_mult = u_net_ff_mult if u_net_ff_mult else ff_mult
+        self.dec_up = Decoder(
+            dim,
+            f=f,
+            num_blocks=num_blocks,
+            mults=up_mults,
+            ff_mult=ff_mult,
+            out_ch=dim,
+            pe_dim=pe_dim,
+            codebook_dim=codebook_dim + time_emb_dim,
+            use_attn=decoder_use_attn,
+            use_batchnorm=False,
+        )
+
+        self.time_emb = FourierFeatures(1, time_emb_dim)
+        self.pos_emb = FourierPosEmb(pe_dim)
+        self.conv_in = nn.Conv2d(3 + dim + time_emb_dim + pe_dim, dim, 3, padding=1)
+
+        if u_net_mults is None:
+            u_net_mults = [2 ** (i + 1) for i in range(u_net_stages)]
+        elif len(u_net_mults) < u_net_stages:
+            u_net_mults = u_net_mults + [
+                u_net_mults[-1] for _ in range(u_net_stages - len(u_net_mults))
+            ]
+        elif len(u_net_mults) > u_net_stages:
+            u_net_mults = u_net_mults[:u_net_stages]
+        u_net_mults = [1] + u_net_mults
+        dims = dim * np.array(u_net_mults)
+
+        self.down_stages = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        Downsampler(d_in, d_out),
+                        Block(
+                            d_out,
+                            num_blocks=num_diffusion_blocks,
+                            ff_mult=u_net_ff_mult,
+                            use_attn=u_net_use_attn,
+                            use_batchnorm=False,
+                        ),
+                    ]
+                )
+                for d_in, d_out in zip(dims[:-1], dims[1:])
+            ]
+        )
+        updims = list(reversed(dims))
+        self.up_stages = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        Block(
+                            d_in,
+                            num_blocks=num_diffusion_blocks,
+                            ff_mult=u_net_ff_mult,
+                            use_attn=u_net_use_attn,
+                            use_batchnorm=False,
+                        ),
+                        SkipUpsampler(d_in, d_out),
+                    ]
+                )
+                for d_in, d_out in zip(updims[:-1], updims[1:])
+            ]
+        )
+        self.conv_out = nn.Sequential(
+            nn.Conv2d(dim * 2 + time_emb_dim, dim, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim, out_ch, 3, padding=1),
+        )
+
+    def forward(self, z, noised_real, t):
+        _, _, zh, zw = z.shape
+        _, _, h, w = noised_real.shape
+        te = self.time_emb(t[:, None])[:, :, None, None]
+        zt = torch.cat([z, te.expand(-1, -1, zh, zw)], dim=1)
+        zu = self.dec_up(zt)
+        pe = self.pos_emb(noised_real)
+        with torch.cuda.amp.autocast(False):
+            zu = zu.to(dtype=noised_real.dtype)
+            te = te.to(dtype=noised_real.dtype)
+            pe = pe.to(dtype=noised_real.dtype)
+            x = torch.cat([zu, te.expand(-1, -1, h, w), pe, noised_real], dim=1)
+            x = self.conv_in(x)
+
+        skips = []
+
+        for down, block in self.down_stages:
+            x = down(x)
+            skips.append(x)
+            x = block(x)
+
+        for block, skipup in self.up_stages:
+            x = block(x)
+            skip = skips.pop()
+            x = torch.cat([x, skip], dim=1)
+            x = skipup(x)
+
+        with torch.cuda.amp.autocast(False):
+            zu = zu.to(dtype=torch.float32)
+            te = te.to(dtype=torch.float32)
+            x = x.to(dtype=torch.float32)
+            return self.conv_out(torch.cat([zu, te.expand(-1, -1, h, w), x], dim=1))
+
+    def ddim_sample(
+        self, z, start: Tuple[float, torch.Tensor] = None, num_steps: int = 16
+    ):
+        b, _, hz, wz = z.size()
+        h, w = hz * self.f, wz * self.f
+        if start is not None:
+            x, t = start
+        else:
+            x = torch.randn([b, self.out_ch, h, w], device=z.device)
+            t = torch.ones(b, device=z.device)
+        step_weights = torch.linspace(0.0, 1.0, num_steps, device=z.device)
+        ts = torch.lerp(t[None, :], torch.zeros_like(t)[None, :], step_weights[:, None])
+        dists = ts[:-1] - ts[1:]
+        deltas = math.pi / 2 * dists
+
+        for t, delta in zip(ts[:-1], tqdm(deltas)):
+            v = self(z, x, t)
+            x = (
+                x * torch.cos(delta)[:, None, None, None]
+                - v * torch.sin(delta)[:, None, None, None]
+            )
+
+        return x
+
+
+class DiffusionAE(nn.Module):
+    def __init__(
+        self,
+        dim: int = 32,
+        f: int = 8,
+        num_blocks: int = 2,
+        mults: Sequence[int] = None,
+        down_mults: Sequence[int] = None,
+        up_mults: Sequence[int] = None,
+        ff_mult: int = 2,
+        out_ch: int = 3,
+        pe_dim: int = 8,
+        codebook_dim: int = 16,
+        use_ddp: bool = True,
+        encoder_use_attn: bool = False,
+        decoder_use_attn: bool = False,
+        u_net_use_attn: bool = False,
+        u_net_stages: int = 4,
+        u_net_ff_mult: int = None,
+        u_net_mults: Sequence[int] = None,
+        num_diffusion_blocks: int = None,
+        time_emb_dim: int = 4,
+    ):
+        super().__init__()
+        mults = (
+            mults
+            if mults
+            else up_mults
+            if up_mults
+            else down_mults
+            if down_mults
+            else u_net_mults
+            if u_net_mults
+            else None
+        )
+        if down_mults is None:
+            down_mults = mults
+        if up_mults is None:
+            up_mults = mults
+        if u_net_mults is None:
+            u_net_mults = mults
+        self.encoder = Encoder(
+            dim,
+            f=f,
+            num_blocks=num_blocks,
+            mults=down_mults,
+            ff_mult=ff_mult,
+            in_ch=out_ch,
+            pe_dim=pe_dim,
+            codebook_dim=codebook_dim,
+            use_ddp=use_ddp,
+            use_attn=encoder_use_attn,
+            use_batchnorm=False,
+        )
+        self.decoder = DiffusionDecoder(
+            dim,
+            f=f,
+            num_blocks=num_blocks,
+            up_mults=up_mults,
+            ff_mult=ff_mult,
+            out_ch=out_ch,
+            pe_dim=pe_dim,
+            codebook_dim=codebook_dim,
+            decoder_use_attn=decoder_use_attn,
+            u_net_use_attn=u_net_use_attn,
+            u_net_stages=u_net_stages,
+            u_net_ff_mult=u_net_ff_mult,
+            u_net_mults=u_net_mults,
+            num_diffusion_blocks=num_diffusion_blocks,
+            time_emb_dim=time_emb_dim,
+        )
 

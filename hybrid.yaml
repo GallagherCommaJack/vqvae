@@ -1,0 +1,62 @@
+data:
+  root_dir: /data1/DALLE-datasets/general/cc12
+  ix_file: ixs_filtered.txt
+  res: 256
+  img_folder: images
+
+  val_size: 8
+  seed: 42
+  batch_size: 32
+  num_workers: 128
+
+model:
+  lr: 1e-4
+  codebook_weight: 1e-2
+  encoder:
+    class_path: net.Encoder
+    init_args:
+      dim: 32
+      f: 8
+      codebook_dim: 12
+      num_blocks: 4
+      ff_mult: 4
+      use_ddp: False
+      use_attn: False
+  decoder:
+    class_path: net.Decoder
+    init_args:
+      dim: 32
+      f: 8
+      codebook_dim: 12
+      num_blocks: 4
+      ff_mult: 4
+      use_attn: False
+  diffusion_decoder:
+    class_path: net.DiffusionDecoder
+    init_args:
+      dim: 32
+      f: 8
+      num_blocks: 2
+      ff_mult: 1
+      codebook_dim: 12
+      u_net_stages: 3
+      u_net_ff_mult: 4
+      num_diffusion_blocks: 4
+  metrics:
+    class_path: task.Metrics
+    init_args:
+      use_fid: True
+      use_is: True
+      use_psnr: True
+      use_ssim: False
+
+trainer:
+  gpus: 8
+  strategy: ddp_find_unused_parameters_false
+  auto_lr_find: True
+  val_check_interval: 0.02
+  log_every_n_steps: 1
+  gradient_clip_val: 0.5
+  gradient_clip_algorithm: value
+  resume_from_checkpoint: /data2/vqvae-ckpt/hybrid/1/last.ckpt
+  # fast_dev_run: 10

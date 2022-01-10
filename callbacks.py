@@ -5,13 +5,13 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning import Callback
 
+from torchmetrics import FID, IS, PSNR, SSIM
+
 from pytorch_lightning.utilities.types import STEP_OUTPUT
 from pytorch_lightning.utilities.distributed import rank_zero_only
 import torch.nn.functional as F
 from torchvision.utils import make_grid
 import wandb
-
-from PIL import ImageChops
 
 
 class ReconstructedImageLogger(Callback):
@@ -71,16 +71,24 @@ class ReconstructedImageLogger(Callback):
         qdiff_grid = x_grid.sub(quant_grid).abs()
         qerr_grid = xrec_grid.sub(quant_grid).abs()
         if self.use_wandb:
-            trainer.logger.experiment.log(
-                {
-                    f"{prefix}/input": wandb.Image(x_grid),
-                    f"{prefix}/reconstruction/continuous": wandb.Image(xrec_grid),
-                    f"{prefix}/reconstruction/quantized": wandb.Image(quant_grid),
-                    f"{prefix}/diff/continuous": wandb.Image(diff_grid),
-                    f"{prefix}/diff/quantized": wandb.Image(qdiff_grid),
-                    f"{prefix}/diff/quantization": wandb.Image(qerr_grid),
-                    "global_step": trainer.global_step,
-                }
+            trainer.logger.log_image(
+                key=f"{prefix}/demo",
+                images=[
+                    x_grid,
+                    xrec_grid,
+                    quant_grid,
+                    diff_grid,
+                    qdiff_grid,
+                    qerr_grid,
+                ],
+                caption=[
+                    "input",
+                    "reconstruction/continuous",
+                    "reconstruction/quantized",
+                    "diff/continuous",
+                    "diff/quantized",
+                    "diff/quantization",
+                ],
             )
         else:
             trainer.logger.experiment.add_image(
@@ -114,9 +122,9 @@ class ReconstructedImageLogger(Callback):
             module.eval()
             reals = batch
             with torch.no_grad():
-                y, q, *_ = module.encode(reals)
-                rc = module.decode(y)
-                rc_q = module.decode(q)
+                y, q, *_ = module.encoder(reals)
+                rc = module.decoder(y)
+                rc_q = module.decoder(q)
             grids = map(self.mk_grid, [reals, rc, rc_q])
             self.log_grids(prefix, trainer, *grids)
             if was_training:
@@ -145,3 +153,80 @@ class ReconstructedImageLogger(Callback):
         dataloader_idx: int,
     ) -> None:
         self.handle_batch(pl_module, "valid", batch, trainer)
+
+
+class PerceptualMetrics(pl.Callback):
+    def __init__(
+        self,
+        use_fid=True,
+        use_is=True,
+        use_psnr=True,
+        use_ssim=True,
+        every_n_train_steps=None,
+        every_n_valid_steps=1,
+    ):
+        super().__init__()
+        self.fid = FID() if use_fid else None
+        self.inc = IS() if use_is else None
+        self.psnr = PSNR() if use_psnr else None
+        self.ssim = SSIM() if use_ssim else None
+        self.every_n_train_steps = every_n_train_steps
+        self.every_n_valid_steps = every_n_valid_steps
+
+    def update(self, outputs):
+        x = outputs["x"].add(1).div(2).clip(0, 1)
+        y = outputs["xrec"].add(1).div(2).clip(0, 1)
+        x_int8 = x.mul(255).to(dtype=torch.uint8)
+        y_int8 = y.mul(255).to(dtype=torch.uint8)
+
+        if self.fid:
+            self.fid.update(x_int8, True)
+            self.fid.update(y_int8, False)
+        if self.inc:
+            self.inc.update(y_int8)
+        if self.psnr:
+            self.psnr.update(y, x)
+        if self.ssim:
+            self.ssim.update(y, x)
+
+    def on_validation_batch_end(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        outputs: Optional[STEP_OUTPUT],
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int,
+    ) -> None:
+        if trainer.global_step % self.every_n_valid_steps == 0:
+            self.update(outputs)
+
+    def on_train_batch_end(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
+        unused: Optional[int] = 0,
+    ) -> None:
+        if self.every_n_train_steps:
+            if trainer.global_step % self.every_n_train_steps == 0:
+                self.update(outputs)
+
+    def on_validation_epoch_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        ld = {}
+        if self.fid:
+            ld["FID"] = self.fid.compute()
+        if self.inc:
+            uncond, cond = self.inc.compute()
+            ld["IS/uncond"] = uncond
+            ld["IS/cond"] = cond
+        if self.psnr:
+            ld["PSNR"] = self.psnr.compute()
+        if self.ssim:
+            ld["SSIM"] = self.ssim.compute()
+        pl_module.log_dict(ld, prog_bar=True)
+

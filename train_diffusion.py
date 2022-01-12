@@ -7,11 +7,11 @@ from task import TrainDiffusionAE
 
 logger = pl.loggers.WandbLogger(project="diffusion-vqvae", log_model=True)
 checkpoint_callback = ModelCheckpoint(
-    "/data2/vqvae-ckpt/diffusion/latest/",
+    "/data2/vqvae-ckpt/diffusion/more_residual_1/",
     save_top_k=10,
     save_last=True,
     monitor="valid/loss/diffusion",
-    filename="epoch={epoch}-FID={FID:.2E}-mse={valid/loss/diffusion:.2E}",
+    filename="epoch={epoch}-FID={valid/metrics/FID:.2E}-mse={valid/loss/diffusion:.2E}",
     auto_insert_metric_name=False,
 )
 

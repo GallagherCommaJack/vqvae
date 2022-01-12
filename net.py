@@ -459,11 +459,14 @@ class Downsample2d(nn.Module):
         weight = torch.einsum("hw,oi->oihw", dkern, cmat)
         self.register_buffer("weight", weight)
 
-    def forward(self, input):
-        n, c, h, w = input.shape
+    def forward(self, x):
+        n, c, h, w = x.shape
         o, i, _, _ = self.weight.shape
         groups = c // i
-        return F.conv2d(input, self.weight, padding=1, stride=2, groups=groups)
+        x = rearrange(x, "b (g c) h w -> (b g) c h w", g=groups)
+        x = F.conv2d(x, self.weight, padding=1, stride=2)
+        x = rearrange(x, "(b g) c h w -> b (g c) h w", g=groups)
+        return x
 
 
 class Upsample2d(nn.Module):
@@ -474,12 +477,13 @@ class Upsample2d(nn.Module):
         self.register_buffer("weight", cmat[:, :, None, None])
         self.upsampler = nn.UpsamplingBilinear2d(scale_factor=2)
 
-    def forward(self, input):
-        n, c, h, w = input.shape
+    def forward(self, x):
+        n, c, h, w = x.shape
         o, i, _, _ = self.weight.shape
         groups = c // i
-        # groups = c // i // o
-        x = F.conv2d(input, self.weight, groups=groups)
+        x = rearrange(x, "b (g c) h w -> (b g) c h w", g=groups)
+        x = F.conv2d(x, self.weight)
+        x = rearrange(x, "(b g) c h w -> b (g c) h w", g=groups)
         return self.upsampler(x)
 
 

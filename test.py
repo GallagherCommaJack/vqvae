@@ -1,29 +1,25 @@
-# %%
-from vector_quantize_pytorch import ResidualVQ, VectorQuantize
-from diffusion_utils import *
 import torch
-import pytorch_lightning as pl
-from net import WNet
+from net import Downsample2d, Upsample2d
+t = torch.randn([3,32,14,14])
+d = Downsample2d(1,2)
+u = Upsample2d(2, 1)
+t_ = d(t)
+b, c, h, w = t.shape
+b_, c_, h_, w_ = t_.shape
+assert b_ == b
+assert c_ == c * 2
+assert h_ == h // 2
+assert w_ == w // 2
 
-# %%
-net = WNet(16, mults=[2,2,4,8], num_blocks=2).cuda()
+t_ = u(t)
+b_, c_, h_, w_ = t_.shape
+assert b_ == b
+assert c_ == c // 2
+assert h_ == h * 2
+assert w_ == w * 2
 
+t__ = d(u(t))
+assert t.shape == t__.shape
+print('max error: ', t.sub(t__).abs().max())
 
-# %%
-# print([type(m) for m in net.encoder.u_net])
-print(torch.cat([torch.flatten(p) for p in net.parameters()]).size(0) / 1e6)
-
-# %%
-x = torch.randn([8, 3, 256, 256]).cuda()
-y, l = net.forward(x)
-print(y.shape, l.shape)
-
-# %%
-from task import BaseAE
-
-lm = BaseAE(net).cuda()
-x = torch.randn([8, 3, 256, 256]).cuda()
-rc, losses = lm.handle_reals(x)
-
-print({k: v.shape for k, v in losses.items()})
-print(losses)
+print('success')

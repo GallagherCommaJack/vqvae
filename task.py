@@ -184,8 +184,7 @@ class BaseAEGAN(BaseAE):
         return rc, losses
 
 
-from diffusion_utils.utils import (ema_update, get_alphas_sigmas,
-                                   get_ddpm_schedule)
+from diffusion_utils.utils import ema_update, get_alphas_sigmas, get_ddpm_schedule
 
 from net import Decoder, DiffusionAE, DiffusionDecoder, Encoder
 
@@ -437,12 +436,22 @@ class TrainDiffusionAE(pl.LightningModule):
             it, ddim = map(partial(make_grid, padding=2, nrow=8), [it, ddim])
             try:
                 self.logger.log_image(
-                    key="val/demo", images=[it, ddim], caption=["input", "ddim"],
+                    key="valid/demo/grids",
+                    images=[it, ddim],
+                    caption=["input", "ddim"],
                 )
             except NotImplementedError:
                 pass
 
         return d
+
+    def on_validation_epoch_end(self) -> None:
+        self.log_dict(
+            {
+                f"valid/metrics/{k}": v.detach()
+                for k, v in self.metrics.compute().items()
+            }
+        )
 
     def on_before_zero_grad(self, *args, **kwargs):
         decay = (

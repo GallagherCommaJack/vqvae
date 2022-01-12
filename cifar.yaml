@@ -1,0 +1,49 @@
+model:
+  p_quant: 0.0
+  p_dropout: 0.25
+  aux_weight: 1e-2
+  lr: 1e-3
+  loss_type: nll
+  log_images_every: 100
+  shared_hparams:
+    dim: 64
+    f: 4
+    num_blocks: 4
+    ff_mult: 4
+    pe_dim: 4
+    codebook_dim: 48
+    use_attn: False
+  encoder_hparams:
+    use_codes: False
+  decoder_hparams:
+    out_ch: 6
+
+data:
+  batch_size: 512
+  num_workers: 48
+
+trainer:
+  callbacks:
+    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: ./ckpt/batchstats/latest
+        save_top_k: 5
+        save_last: True
+        monitor: valid/loss/total
+        auto_insert_metric_name: False
+        filename: "epoch={epoch}-FID={valid/FID:.2E}-nll={valid/loss/nll:.2E}-skew={valid/loss/skew}-kurtosis={valid/loss/kurtosis}"
+    # - class_path: pytorch_lightning.callbacks.EarlyStopping
+    #   init_args:
+    #     monitor: valid/loss/total
+    #     patience: 20
+    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+        log_momentum: False
+
+  # auto_lr_find: True
+  # auto_scale_batch_size: True
+  gpus: 1
+  log_every_n_steps: 1
+  strategy: ddp_find_unused_parameters_false
+  check_val_every_n_epoch: 10

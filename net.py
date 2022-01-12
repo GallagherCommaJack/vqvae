@@ -57,7 +57,8 @@ class FourierPosEmb(nn.Module):
         w_axis = torch.linspace(-1, 1, w, device=device, dtype=dtype)
         grid = torch.cat(
             torch.broadcast_tensors(
-                h_axis[None, None, :, None], w_axis[None, None, None, :],
+                h_axis[None, None, :, None],
+                w_axis[None, None, None, :],
             ),
             dim=1,
         )
@@ -80,13 +81,13 @@ class FF(nn.Module):
     def __init__(self, dim: int, ff_mult: int, use_batchnorm: bool = True):
         super().__init__()
         inner = [
-            nn.BatchNorm2d(dim) if use_batchnorm else LayerNorm(dim),
+            nn.SyncBatchNorm(dim) if use_batchnorm else LayerNorm(dim),
             nn.ReLU(inplace=True),
             nn.Conv2d(dim, dim * ff_mult, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(dim * ff_mult, dim, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.BatchNorm2d(dim) if use_batchnorm else LayerNorm(dim),
+            nn.SyncBatchNorm(dim) if use_batchnorm else LayerNorm(dim),
         ]
         with torch.no_grad():
             inner[-1].weight.fill_(1e-1)
@@ -118,7 +119,9 @@ clamp_with_grad = ClampWithGrad.apply
 
 
 def clamp_exp(
-    t: torch.Tensor, low: float = math.log(1e-2), high: float = math.log(100),
+    t: torch.Tensor,
+    low: float = math.log(1e-2),
+    high: float = math.log(100),
 ):
     return clamp_with_grad(t, low, high).exp()
 
@@ -153,7 +156,10 @@ class ScaledCosineAttention(nn.Module):
 
 class ChannelAttention(nn.Module):
     def __init__(
-        self, dim, heads=8, use_batchnorm=True,
+        self,
+        dim,
+        heads=8,
+        use_batchnorm=True,
     ):
         super().__init__()
         self.heads = heads
@@ -161,7 +167,7 @@ class ChannelAttention(nn.Module):
         assert inner_dim % heads == 0
         dim_head = inner_dim // heads
         self.norm_in = (
-            nn.BatchNorm2d(dim, affine=False) if use_batchnorm else LayerNorm(dim)
+            nn.SyncBatchNorm(dim, affine=False) if use_batchnorm else LayerNorm(dim)
         )
         self.attn = ScaledCosineAttention(heads, dim_head)
         self.proj_in = nn.Sequential(
@@ -170,7 +176,7 @@ class ChannelAttention(nn.Module):
         )
         self.proj_out = nn.Sequential(
             nn.Conv2d(inner_dim, dim * 2, 3, padding=1, bias=False),
-            nn.BatchNorm2d(dim * 2) if use_batchnorm else nn.GroupNorm(2, dim * 2),
+            nn.SyncBatchNorm(dim * 2) if use_batchnorm else nn.GroupNorm(2, dim * 2),
         )
         with torch.no_grad():
             self.proj_out[-1].weight.fill_(1e-3)
@@ -208,8 +214,8 @@ class Block(nn.Module):
             blocks = ffs
         self.inner = nn.Sequential(*blocks)
 
-        self.pre_norm = nn.BatchNorm2d(dim) if use_batchnorm else LayerNorm(dim)
-        self.post_norm = nn.BatchNorm2d(dim) if use_batchnorm else LayerNorm(dim)
+        self.pre_norm = nn.SyncBatchNorm(dim) if use_batchnorm else LayerNorm(dim)
+        self.post_norm = nn.SyncBatchNorm(dim) if use_batchnorm else LayerNorm(dim)
 
     def forward(self, x):
         x = self.pre_norm(x)
@@ -242,6 +248,7 @@ class Encoder(nn.Module):
         use_ddp: bool = False,
         use_attn: bool = True,
         use_batchnorm: bool = True,
+        use_codes: bool = True,
     ):
         super().__init__()
         stages = int(math.log2(f))
@@ -257,7 +264,8 @@ class Encoder(nn.Module):
         self.pe = FourierPosEmb(pe_dim)
 
         self.project_in = nn.Sequential(
-            nn.Conv2d(in_ch + pe_dim, dim, 3, padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch + pe_dim, dim, 3, padding=1),
+            nn.ReLU(inplace=True),
         )
         downs = []
         for d_in, d_out in zip(dims[:stages], dims[1 : stages + 1]):
@@ -277,33 +285,39 @@ class Encoder(nn.Module):
 
         self.quant_conv = nn.Sequential(
             nn.Conv2d(dims[stages], codebook_dim, 1, bias=False),
-            nn.BatchNorm2d(codebook_dim, affine=False)
+            nn.SyncBatchNorm(codebook_dim, affine=False)
             if use_batchnorm
             else nn.GroupNorm(1, codebook_dim, affine=False),
         )
 
-        self.codebooks = ResidualVQ(
-            dim=codebook_dim,
-            num_quantizers=num_codebooks,
-            codebook_size=num_codes,
-            kmeans_init=True,
-            decay=0.99,
-            commitment_weight=1.0,
-            accept_image_fmap=True,
-            sync_codebook=use_ddp,
-        )
+        if use_codes:
+            self.codebooks = ResidualVQ(
+                dim=codebook_dim,
+                num_quantizers=num_codebooks,
+                codebook_size=num_codes,
+                kmeans_init=True,
+                decay=0.99,
+                commitment_weight=1.0,
+                accept_image_fmap=True,
+                sync_codebook=use_ddp,
+            )
+        else:
+            self.codebooks = None
 
     def forward(self, x):
         y = torch.cat([x, self.pe(x)], dim=1)
         y = self.project_in(y)
         y = self.down(y)
-        with torch.cuda.amp.autocast(False):
-            y = y.to(dtype=torch.float32)
-            y = self.quant_conv(y)
-            qs, ixs, ls = self.codebooks(y)
-        ixs = rearrange(ixs, "c b h w -> b c h w")
-        l_quant = torch.mean(ls)
-        return y, qs, ixs, l_quant
+        if self.codebooks is None:
+            return self.quant_conv(y)
+        else:
+            with torch.cuda.amp.autocast(False):
+                y = y.to(dtype=torch.float32)
+                y = self.quant_conv(y)
+                qs, ixs, ls = self.codebooks(y)
+            ixs = rearrange(ixs, "c b h w -> b c h w")
+            l_quant = torch.mean(ls)
+            return y, qs, ixs, l_quant
 
 
 class Upsampler(nn.Sequential):
@@ -655,4 +669,3 @@ class DiffusionAE(nn.Module):
             num_diffusion_blocks=num_diffusion_blocks,
             time_emb_dim=time_emb_dim,
         )
-

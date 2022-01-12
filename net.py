@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusion_utils.norm import LayerNorm
-from einops import rearrange
+from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from torch import nn
 from torch.nn.modules import padding
@@ -57,8 +57,7 @@ class FourierPosEmb(nn.Module):
         w_axis = torch.linspace(-1, 1, w, device=device, dtype=dtype)
         grid = torch.cat(
             torch.broadcast_tensors(
-                h_axis[None, None, :, None],
-                w_axis[None, None, None, :],
+                h_axis[None, None, :, None], w_axis[None, None, None, :],
             ),
             dim=1,
         )
@@ -119,9 +118,7 @@ clamp_with_grad = ClampWithGrad.apply
 
 
 def clamp_exp(
-    t: torch.Tensor,
-    low: float = math.log(1e-2),
-    high: float = math.log(100),
+    t: torch.Tensor, low: float = math.log(1e-2), high: float = math.log(100),
 ):
     return clamp_with_grad(t, low, high).exp()
 
@@ -156,10 +153,7 @@ class ScaledCosineAttention(nn.Module):
 
 class ChannelAttention(nn.Module):
     def __init__(
-        self,
-        dim,
-        heads=8,
-        use_batchnorm=True,
+        self, dim, heads=8, use_batchnorm=True,
     ):
         super().__init__()
         self.heads = heads
@@ -264,8 +258,7 @@ class Encoder(nn.Module):
         self.pe = FourierPosEmb(pe_dim)
 
         self.project_in = nn.Sequential(
-            nn.Conv2d(in_ch + pe_dim, dim, 3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch + pe_dim, dim, 3, padding=1), nn.ReLU(inplace=True),
         )
         downs = []
         for d_in, d_out in zip(dims[:stages], dims[1 : stages + 1]):
@@ -445,6 +438,51 @@ class VQVAE(nn.Module):
         return rc, l_quant
 
 
+def compute_channel_change_mat(io_ratio):
+    base = torch.eye(1)
+    if io_ratio < 1:
+        # reduce channels
+        c_in = int(1 / io_ratio)
+        cmat = repeat(base * io_ratio, "i1 i2 -> i1 (i2 m)", m=c_in)
+    else:
+        c_out = int(io_ratio)
+        cmat = repeat(base, "i1 i2 -> (i1 m) i2", m=c_out)
+    return cmat
+
+
+class Downsample2d(nn.Module):
+    def __init__(self, c_in, c_out):
+        super().__init__()
+        dkern = torch.tensor([[1, 3, 3, 1]]) / 8
+        dkern = dkern.T @ dkern
+        cmat = compute_channel_change_mat(c_out / c_in)
+        weight = torch.einsum("hw,oi->oihw", dkern, cmat)
+        self.register_buffer("weight", weight)
+
+    def forward(self, input):
+        n, c, h, w = input.shape
+        o, i, _, _ = self.weight.shape
+        groups = c // i
+        return F.conv2d(input, self.weight, padding=1, stride=2, groups=groups)
+
+
+class Upsample2d(nn.Module):
+    def __init__(self, c_in, c_out):
+        # todo: figure out how to do this w/a fused kernel
+        super().__init__()
+        cmat = compute_channel_change_mat(c_out / c_in)
+        self.register_buffer("weight", cmat[:, :, None, None])
+        self.upsampler = nn.UpsamplingBilinear2d(scale_factor=2)
+
+    def forward(self, input):
+        n, c, h, w = input.shape
+        o, i, _, _ = self.weight.shape
+        groups = c // i
+        # groups = c // i // o
+        x = F.conv2d(input, self.weight, groups=groups)
+        return self.upsampler(x)
+
+
 class DiffusionDecoder(nn.Module):
     def __init__(
         self,
@@ -503,7 +541,7 @@ class DiffusionDecoder(nn.Module):
             [
                 nn.ModuleList(
                     [
-                        Downsampler(d_in, d_out),
+                        Downsample2d(d_in, d_out),
                         Block(
                             d_out,
                             num_blocks=num_diffusion_blocks,
@@ -528,7 +566,7 @@ class DiffusionDecoder(nn.Module):
                             use_attn=u_net_use_attn,
                             use_batchnorm=False,
                         ),
-                        SkipUpsampler(d_in, d_out),
+                        Upsample2d(d_in, d_out),
                     ]
                 )
                 for d_in, d_out in zip(updims[:-1], updims[1:])
@@ -561,11 +599,11 @@ class DiffusionDecoder(nn.Module):
             skips.append(x)
             x = block(x)
 
-        for block, skipup in self.up_stages:
+        for block, up in self.up_stages:
             x = block(x)
             skip = skips.pop()
-            x = torch.cat([x, skip], dim=1)
-            x = skipup(x)
+            x = (x + skip) / 2
+            x = up(x)
 
         with torch.cuda.amp.autocast(False):
             zu = zu.to(dtype=torch.float32)

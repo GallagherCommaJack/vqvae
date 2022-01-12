@@ -1,25 +1,22 @@
 model:
+  p_quant: 0.0
   ae:
-    class_path: net.DiffusionAE
-    init_args:
-      dim: 32
-      f: 8
-      num_blocks: 4
-      ff_mult: 4
-      out_ch: 3
-      pe_dim: 8
-      time_emb_dim: 4
-      codebook_dim: 12
-      use_ddp: True
-      u_net_stages: 4
-      num_diffusion_blocks: 4
-      time_emb_dim: 4
+    dim: 32
+    f: 16
+    num_blocks: 4
+    ff_mult: 4
+    out_ch: 3
+    pe_dim: 8
+    time_emb_dim: 4
+    codebook_dim: 12
+    use_ddp: True
+    u_net_stages: 4
+    num_diffusion_blocks: 4
+    time_emb_dim: 4
   metrics:
-    class_path: task.Metrics
-    init_args:
-      use_fid: True
-      use_is: True
-      use_psnr: True
-      use_ssim: False
+    use_fid: True
+    use_is: True
+    use_psnr: True
+    use_ssim: False
   lr: 1e-4
   codebook_weight: 1e-2

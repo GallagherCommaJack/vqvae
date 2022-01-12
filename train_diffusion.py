@@ -11,7 +11,8 @@ checkpoint_callback = ModelCheckpoint(
     save_top_k=10,
     save_last=True,
     monitor="valid/loss/diffusion",
-    filename="{epoch}-{FID:.2f}",
+    filename="epoch={epoch}-FID={FID:.2E}-mse={valid/loss/diffusion:.2E}",
+    auto_insert_metric_name=False,
 )
 
 trainer_defaults = dict(logger=logger)

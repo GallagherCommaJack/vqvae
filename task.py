@@ -3,6 +3,7 @@ import math
 from copy import deepcopy
 from functools import partial
 from timeit import default_timer as timer
+from typing import Any, Dict
 
 import lpips
 import pytorch_lightning as pl
@@ -169,11 +170,7 @@ class BaseAEGAN(BaseAE):
             seed=seed,
             lr=lr,
         )
-        self.disc = discriminator(
-            dim=disc_dim,
-            depth=disc_depth,
-            grad_scale=-1.0,
-        )
+        self.disc = discriminator(dim=disc_dim, depth=disc_depth, grad_scale=-1.0,)
         self.weights["disc"] = disc_weight
 
     def handle_reals(self, reals):
@@ -187,7 +184,8 @@ class BaseAEGAN(BaseAE):
         return rc, losses
 
 
-from diffusion_utils.utils import ema_update, get_alphas_sigmas, get_ddpm_schedule
+from diffusion_utils.utils import (ema_update, get_alphas_sigmas,
+                                   get_ddpm_schedule)
 
 from net import Decoder, DiffusionAE, DiffusionDecoder, Encoder
 
@@ -338,8 +336,8 @@ class HybridDiffusionAE(pl.LightningModule):
 class TrainDiffusionAE(pl.LightningModule):
     def __init__(
         self,
-        ae: DiffusionAE,
-        metrics: Metrics,
+        ae: Dict[str, Any] = {},
+        metrics: Dict[str, bool] = {},
         codebook_weight: float = 1.0,
         diffusion_weight: float = 1.0,
         p_quant: float = 0.5,
@@ -349,8 +347,9 @@ class TrainDiffusionAE(pl.LightningModule):
         lr=1e-4,
     ):
         super().__init__()
-        self.ae = ae
-        self.ae_ema = deepcopy(ae).eval().requires_grad_(False)
+
+        self.ae = DiffusionAE(**ae)
+        self.ae_ema = deepcopy(self.ae).eval().requires_grad_(False)
 
         weight_sum = codebook_weight + diffusion_weight
         self.weights = {
@@ -360,7 +359,7 @@ class TrainDiffusionAE(pl.LightningModule):
 
         self.p_quant = p_quant
         self.rng = torch.quasirandom.SobolEngine(dimension=1, scramble=True, seed=seed)
-        self.metrics = metrics.eval().requires_grad_(False)
+        self.metrics = Metrics(**metrics).eval().requires_grad_(False)
         self.ema_init_steps = ema_init_steps
         self.ema_decay = ema_decay
         self.lr = lr

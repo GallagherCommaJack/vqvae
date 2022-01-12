@@ -6,13 +6,14 @@ model:
     num_blocks: 4
     ff_mult: 4
     out_ch: 3
-    pe_dim: 8
     time_emb_dim: 4
-    codebook_dim: 12
+    pe_dim: 8
+    num_codes: 2
+    num_codebooks: 14
+    codebook_dim: 64
     use_ddp: True
     u_net_stages: 4
     num_diffusion_blocks: 4
-    time_emb_dim: 4
   metrics:
     use_fid: True
     use_is: True

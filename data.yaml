@@ -6,7 +6,7 @@ data:
 
   val_size: 8
   seed: 42
-  batch_size: 64
+  batch_size: 32
   num_workers: 128
 
 trainer:

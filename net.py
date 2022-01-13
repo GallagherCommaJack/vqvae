@@ -453,8 +453,8 @@ def compute_channel_change_mat(io_ratio):
 class Downsample2d(nn.Module):
     def __init__(self, c_in, c_out):
         super().__init__()
-        dkern = torch.tensor([[1, 3, 3, 1]]) / 8
-        dkern = dkern.T @ dkern
+        dkern = torch.tensor([1, 2, 1]) / 4
+        dkern = dkern[:, None] @ dkern[None, :]
         cmat = compute_channel_change_mat(c_out / c_in)
         weight = torch.einsum("hw,oi->oihw", dkern, cmat)
         self.register_buffer("weight", weight)
@@ -577,7 +577,7 @@ class DiffusionDecoder(nn.Module):
             ]
         )
         self.conv_out = nn.Sequential(
-            nn.Conv2d(dim * 2 + time_emb_dim, dim, 3, padding=1),
+            nn.Conv2d(dim, dim, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(dim, out_ch, 3, padding=1),
         )
@@ -599,21 +599,19 @@ class DiffusionDecoder(nn.Module):
         skips = []
 
         for down, block in self.down_stages:
-            x = down(x)
             skips.append(x)
+            x = down(x)
             x = block(x)
 
         for block, up in self.up_stages:
             x = block(x)
+            x = up(x)
             skip = skips.pop()
             x = (x + skip) / 2
-            x = up(x)
 
         with torch.cuda.amp.autocast(False):
-            zu = zu.to(dtype=torch.float32)
-            te = te.to(dtype=torch.float32)
             x = x.to(dtype=torch.float32)
-            return self.conv_out(torch.cat([zu, te.expand(-1, -1, h, w), x], dim=1))
+            return self.conv_out(x)
 
     def ddim_sample(
         self, z, start: Tuple[float, torch.Tensor] = None, num_steps: int = 16
